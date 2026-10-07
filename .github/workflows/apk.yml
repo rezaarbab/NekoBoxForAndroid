@@ -1,0 +1,116 @@
+name: APK (hosted runner)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_HOME: ${{ github.workspace }}/android-sdk
+  SDK_PLATFORM: android-36
+  SDK_BUILD_TOOLS: 36.0.0
+  NDK_VERSION: 25.0.8775105
+  CMDLINE_TOOLS_URL: https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip
+
+jobs:
+  apk:
+    name: LibCore + OSS debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: libcore/go.mod
+          cache-dependency-path: libcore/go.sum
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Android SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_HOME }}
+          key: android-${{ env.SDK_PLATFORM }}-${{ env.SDK_BUILD_TOOLS }}-${{ env.NDK_VERSION }}
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKM" ]; then
+            curl -fL --retry 3 --max-time 600 "$CMDLINE_TOOLS_URL" -o /tmp/cmdline-tools.zip
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          # sdkmanager closes its stdin as soon as it has enough answers, so `yes` dies of
+          # SIGPIPE and pipefail would report that as a step failure.
+          { yes | "$SDKM" --licenses > /dev/null; } 2>/dev/null || true
+          "$SDKM" --install "platform-tools" "build-tools;${SDK_BUILD_TOOLS}" > /dev/null
+          # AGP needs the platform compileSdk points at, and API 37 is only published with a
+          # minor suffix, so the exact id is read from the repository instead of hard-coded.
+          offered="$("$SDKM" --list 2>/dev/null | { grep -oE 'platforms;android-[0-9]+(\.[0-9]+)*' || true; } | sort -uV)"
+          echo "$offered" | sed 's/^/>> platform offered: /'
+          want="$( { echo "$offered" | grep -E "^platforms;${SDK_PLATFORM}[0-9.]*$" || true; } | sort -V | tail -1)"
+          if [ -z "$want" ]; then
+            want="$(echo "$offered" | tail -1)"
+            [ -n "$want" ] || { echo "Error: SDK repository offers no platform packages" >&2; exit 1; }
+            echo ">> WARNING: no ${SDK_PLATFORM} platform offered, installing $want instead"
+          fi
+          echo ">> installing platform $want"
+          "$SDKM" --install "$want" > /dev/null
+          # libcore/build.sh calls gomobile bind -androidapi 21, and that gomobile looks the
+          # requested API level up by name, so it needs platforms/android-21 next to 37.2.
+          "$SDKM" --install "platforms;android-21" > /dev/null
+          if ! "$SDKM" --install "ndk;${NDK_VERSION}" > /dev/null; then
+            latest="$("$SDKM" --list 2>/dev/null | { grep -oE 'ndk;[0-9]+\.[0-9]+\.[0-9]+' || true; } | sort -V | tail -1)"
+            [ -n "$latest" ] || { echo "Error: no NDK offered by the SDK repository" >&2; exit 1; }
+            echo ">> pinned NDK ${NDK_VERSION} unavailable, using $latest"
+            "$SDKM" --install "$latest" > /dev/null
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${latest#ndk;}" >> "$GITHUB_ENV"
+            echo "NDK=$ANDROID_HOME/ndk/${latest#ndk;}" >> "$GITHUB_ENV"
+          fi
+          "$SDKM" --list_installed
+
+      - name: Build libcore
+        run: |
+          set -euo pipefail
+          bash buildScript/lib/core.sh
+          bash scripts/verify-elf-alignment.sh app/libs/libcore.aar
+
+      - name: Download app assets
+        run: bash buildScript/init/action/gradle.sh
+
+      - name: Build OSS debug APK
+        run: |
+          set -euo pipefail
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+          ./gradlew app:assembleOssDebug
+
+      - name: Collect APK
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          APK="$(find app/build/outputs -name '*arm64-v8a*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "Error: no arm64-v8a APK under app/build/outputs" >&2
+            exit 1
+          fi
+          cp "$APK" out/
+          sha256sum out/*.apk | tee out/SHA256SUMS
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NekoBox-arm64-v8a-debug
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
