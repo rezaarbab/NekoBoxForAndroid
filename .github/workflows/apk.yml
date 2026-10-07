@@ -55,9 +55,8 @@ jobs:
           # SIGPIPE and pipefail would report that as a step failure.
           { yes | "$SDKM" --licenses > /dev/null; } 2>/dev/null || true
           "$SDKM" --install "platform-tools" "build-tools;${SDK_BUILD_TOOLS}" > /dev/null
-          # The platform id for API 37 is published with a minor suffix, so read the exact
-          # package id from the repository: gomobile needs a platforms/ directory to package
-          # the AAR and AGP needs the one compileSdk points at.
+          # AGP needs the platform compileSdk points at, and API 37 is only published with a
+          # minor suffix, so the exact id is read from the repository instead of hard-coded.
           offered="$("$SDKM" --list 2>/dev/null | { grep -oE 'platforms;android-[0-9]+(\.[0-9]+)*' || true; } | sort -uV)"
           echo "$offered" | sed 's/^/>> platform offered: /'
           want="$( { echo "$offered" | grep -E "^platforms;${SDK_PLATFORM}[0-9.]*$" || true; } | sort -V | tail -1)"
@@ -68,6 +67,9 @@ jobs:
           fi
           echo ">> installing platform $want"
           "$SDKM" --install "$want" > /dev/null
+          # libcore/build.sh calls gomobile bind -androidapi 21, and that gomobile looks the
+          # requested API level up by name, so it needs platforms/android-21 next to 37.2.
+          "$SDKM" --install "platforms;android-21" > /dev/null
           if ! "$SDKM" --install "ndk;${NDK_VERSION}" > /dev/null; then
             latest="$("$SDKM" --list 2>/dev/null | { grep -oE 'ndk;[0-9]+\.[0-9]+\.[0-9]+' || true; } | sort -V | tail -1)"
             [ -n "$latest" ] || { echo "Error: no NDK offered by the SDK repository" >&2; exit 1; }
