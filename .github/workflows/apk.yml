@@ -1,0 +1,93 @@
+name: APK (hosted runner)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_HOME: ${{ github.workspace }}/android-sdk
+  SDK_PLATFORM: android-37
+  SDK_BUILD_TOOLS: 37.0.0
+  NDK_VERSION: 30.0.16248370
+  CMDLINE_TOOLS_URL: https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip
+
+jobs:
+  apk:
+    name: LibCore + OSS debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: libcore/go.mod
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Android SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_HOME }}
+          key: android-${{ env.SDK_PLATFORM }}-${{ env.SDK_BUILD_TOOLS }}-${{ env.NDK_VERSION }}
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKM" ]; then
+            curl -fL --retry 3 --max-time 600 "$CMDLINE_TOOLS_URL" -o /tmp/cmdline-tools.zip
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          yes | "$SDKM" --licenses > /dev/null
+          "$SDKM" --install \
+            "platform-tools" \
+            "platforms;${SDK_PLATFORM}" \
+            "build-tools;${SDK_BUILD_TOOLS}" \
+            "ndk;${NDK_VERSION}"
+
+      - name: Build libcore
+        run: |
+          set -euo pipefail
+          bash buildScript/lib/core.sh
+          bash scripts/verify-elf-alignment.sh app/libs/libcore.aar
+
+      - name: Download app assets
+        run: bash buildScript/init/action/gradle.sh
+
+      - name: Build OSS debug APK
+        run: |
+          set -euo pipefail
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+          ./gradlew app:assembleOssDebug
+
+      - name: Collect APK
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          APK="$(find app/build/outputs -name '*arm64-v8a*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "Error: no arm64-v8a APK under app/build/outputs" >&2
+            exit 1
+          fi
+          cp "$APK" out/
+          sha256sum out/*.apk | tee out/SHA256SUMS
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NekoBox-arm64-v8a-debug
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
