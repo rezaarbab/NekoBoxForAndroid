@@ -26,6 +26,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: libcore/go.mod
+          cache-dependency-path: libcore/go.sum
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -50,12 +51,23 @@ jobs:
             mkdir -p "$ANDROID_HOME/cmdline-tools"
             mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
           fi
-          yes | "$SDKM" --licenses > /dev/null
-          "$SDKM" --install \
-            "platform-tools" \
-            "platforms;${SDK_PLATFORM}" \
-            "build-tools;${SDK_BUILD_TOOLS}" \
-            "ndk;${NDK_VERSION}"
+          # sdkmanager closes its stdin as soon as it has enough answers, so `yes` dies of
+          # SIGPIPE and pipefail would report that as a step failure.
+          { yes | "$SDKM" --licenses > /dev/null; } 2>/dev/null || true
+          # AGP downloads a missing platform or build-tools itself, so an unavailable
+          # package here is only a warning. The NDK is not fetched by AGP, so it is fatal.
+          for pkg in "platform-tools" "platforms;${SDK_PLATFORM}" "build-tools;${SDK_BUILD_TOOLS}"; do
+            "$SDKM" --install "$pkg" > /dev/null || echo ">> not available in the SDK repository: $pkg"
+          done
+          if ! "$SDKM" --install "ndk;${NDK_VERSION}" > /dev/null; then
+            latest="$("$SDKM" --list 2>/dev/null | { grep -oE 'ndk;[0-9]+\.[0-9]+\.[0-9]+' || true; } | sort -V | tail -1)"
+            [ -n "$latest" ] || { echo "Error: no NDK offered by the SDK repository" >&2; exit 1; }
+            echo ">> pinned NDK ${NDK_VERSION} unavailable, using $latest"
+            "$SDKM" --install "$latest" > /dev/null
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${latest#ndk;}" >> "$GITHUB_ENV"
+            echo "NDK=$ANDROID_HOME/ndk/${latest#ndk;}" >> "$GITHUB_ENV"
+          fi
+          "$SDKM" --list_installed
 
       - name: Build libcore
         run: |
