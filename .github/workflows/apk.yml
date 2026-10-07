@@ -54,11 +54,20 @@ jobs:
           # sdkmanager closes its stdin as soon as it has enough answers, so `yes` dies of
           # SIGPIPE and pipefail would report that as a step failure.
           { yes | "$SDKM" --licenses > /dev/null; } 2>/dev/null || true
-          # AGP downloads a missing platform or build-tools itself, so an unavailable
-          # package here is only a warning. The NDK is not fetched by AGP, so it is fatal.
-          for pkg in "platform-tools" "platforms;${SDK_PLATFORM}" "build-tools;${SDK_BUILD_TOOLS}"; do
-            "$SDKM" --install "$pkg" > /dev/null || echo ">> not available in the SDK repository: $pkg"
-          done
+          "$SDKM" --install "platform-tools" "build-tools;${SDK_BUILD_TOOLS}" > /dev/null
+          # The platform id for API 37 is published with a minor suffix, so read the exact
+          # package id from the repository: gomobile needs a platforms/ directory to package
+          # the AAR and AGP needs the one compileSdk points at.
+          offered="$("$SDKM" --list 2>/dev/null | { grep -oE 'platforms;android-[0-9]+(\.[0-9]+)*' || true; } | sort -uV)"
+          echo "$offered" | sed 's/^/>> platform offered: /'
+          want="$( { echo "$offered" | grep -E "^platforms;${SDK_PLATFORM}[0-9.]*$" || true; } | sort -V | tail -1)"
+          if [ -z "$want" ]; then
+            want="$(echo "$offered" | tail -1)"
+            [ -n "$want" ] || { echo "Error: SDK repository offers no platform packages" >&2; exit 1; }
+            echo ">> WARNING: no ${SDK_PLATFORM} platform offered, installing $want instead"
+          fi
+          echo ">> installing platform $want"
+          "$SDKM" --install "$want" > /dev/null
           if ! "$SDKM" --install "ndk;${NDK_VERSION}" > /dev/null; then
             latest="$("$SDKM" --list 2>/dev/null | { grep -oE 'ndk;[0-9]+\.[0-9]+\.[0-9]+' || true; } | sort -V | tail -1)"
             [ -n "$latest" ] || { echo "Error: no NDK offered by the SDK repository" >&2; exit 1; }
